@@ -1,5 +1,7 @@
 # retinal_vessel_segmentation
 
+# Data
+![example](example.png)
 
 # TODO
 * stable diffusion for data  augmentation
