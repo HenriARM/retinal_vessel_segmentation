@@ -1,4 +1,5 @@
 # pip install deeplake
+# pip install pytorch-lightning torchvision
 
 import cv2
 import numpy as np
@@ -6,6 +7,7 @@ import deeplake
 
 # Load the datasets
 # https://datasets.activeloop.ai/docs/ml/datasets/drive-dataset/
+# https://app.activeloop.ai/activeloop/drive-train/firstdbf9474d461a19e9333c2fd19b46115348f
 train_ds = deeplake.load("hub://activeloop/drive-train")
 # test_ds = deeplake.load("hub://activeloop/drive-test")
 # train_dataloader = train_ds.pytorch(num_workers=0, batch_size=4, shuffle=False)
