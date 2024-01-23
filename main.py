@@ -139,7 +139,6 @@ class DRIVECustomDataset(Dataset):
         target = np.array(target)
         target[target != 0] = 1
         target = torch.from_numpy(target).long()
-        # target.byte()
         return image, target
 
 
