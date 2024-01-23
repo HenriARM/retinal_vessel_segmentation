@@ -1,4 +1,3 @@
-import cv2
 import deeplake
 import torch
 
@@ -6,15 +5,13 @@ print(torch.cuda.device_count())
 print(torch.cuda.get_device_name(0))
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, random_split
 import torchvision.models as models
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
 from torchvision import transforms
 import numpy as np
 import matplotlib.pyplot as plt
-
 from torchmetrics.detection import IntersectionOverUnion
-from torch.utils.data import Dataset
 from PIL import Image
 
 
@@ -131,9 +128,7 @@ class DRIVECustomDataset(Dataset):
 
     def __getitem__(self, idx):
         # Load the images and masks
-        image = self.deeplake_dataset["rgb_images"][idx].numpy()
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        image = Image.fromarray(image)
+        image = Image.fromarray(self.deeplake_dataset["rgb_images"][idx].numpy())
         if self.transform:
             image = self.transform(image)
 
@@ -146,9 +141,6 @@ class DRIVECustomDataset(Dataset):
         target = torch.from_numpy(target).long()
         # target.byte()
         return image, target
-
-
-from torch.utils.data import random_split
 
 
 def main():
@@ -171,8 +163,8 @@ def main():
     train_size = int(0.8 * len(train_dataset))
     val_size = len(train_dataset) - train_size
     train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
 
     # Model, Trainer, and Training
     model = UNet()
