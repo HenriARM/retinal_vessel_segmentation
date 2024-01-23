@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
 import torchvision.models as models
 import pytorch_lightning as pl
-from torchvision import transforms
+from torchvision import transforms as T
 import numpy as np
 import matplotlib.pyplot as plt
 from torchmetrics.detection import IntersectionOverUnion
@@ -97,6 +97,7 @@ class UNet(pl.LightningModule):
         # preds = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
         # self.iou_metric.update(preds, targets)
         # Log loss
+        print(f"val_loss: {loss}")
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
@@ -143,14 +144,26 @@ class DRIVECustomDataset(Dataset):
 
 
 def main():
-    transform = transforms.Compose(
-        [transforms.Resize((256, 256)), transforms.ToTensor()]
-    )
-    target_transform = transforms.Compose(
+    transform = T.Compose(
         [
-            transforms.Resize(
-                (256, 256), interpolation=transforms.InterpolationMode.NEAREST
-            )
+            # TODO: will not work since we need to make sure that flip is applied
+            #  to both image and mask at the same time
+            # TODO: use albumentation
+            # T.RandomHorizontalFlip(),
+            # T.RandomVerticalFlip(),
+            # TODO: check picture incorrect_augmentation.png
+            # T.RandomRotation(degrees=(0, 360)),
+            # only applied to image with mode RGB
+            T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+            T.Resize((256, 256)),
+            T.ToTensor(),
+        ]
+    )
+    target_transform = T.Compose(
+        [
+            # T.RandomHorizontalFlip(),
+            # T.RandomVerticalFlip(),
+            T.Resize((256, 256), interpolation=T.InterpolationMode.NEAREST),
         ]
     )
 
@@ -165,6 +178,8 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
 
+    # TODO: should val dataset have augmentation?
+
     # Model, Trainer, and Training
     model = UNet()
     val_images, val_masks = next(iter(val_loader))
@@ -173,7 +188,7 @@ def main():
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=[0],
-        max_epochs=100,
+        max_epochs=500,
         callbacks=[image_prediction_logger],
     )
     trainer.fit(model, train_loader, val_loader)

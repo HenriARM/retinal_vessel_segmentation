@@ -4,6 +4,8 @@
 ![example](example.png)
 
 # TODO
+* for faster training maybe run augmentation and save it locally
+
 * stable diffusion for data augmentation
 * Dice loss (for metrics), IoU (Jaccard index)
 * U-net squarred
