@@ -4,13 +4,10 @@
 ![example](example.png)
 
 # TODO
-* for faster training maybe run augmentation and save it locally
-
 * stable diffusion for data augmentation
 * Dice loss (for metrics), IoU (Jaccard index)
 * U-net squarred
 * Focal loss? ask colleagues for tricks in segmentation
-
 * hydra
 * interpretebility (gradcam, saliency maps ,captum)
 * distributed training
@@ -19,3 +16,6 @@
 * hyperopt
 
 * add something from statistics (confidence tests etc.)
+
+
+pip install hydra-core
