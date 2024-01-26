@@ -1,19 +1,265 @@
-import deeplake
+import argparse
+import os
 import torch
-
-print(torch.cuda.device_count())
-print(torch.cuda.get_device_name(0))
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, random_split
-import torchvision.models as models
 import pytorch_lightning as pl
-from torchvision import transforms as T
-import numpy as np
-import matplotlib.pyplot as plt
-from torchmetrics.detection import IntersectionOverUnion
-from PIL import Image
+from pytorch_lightning.loggers import WandbLogger
+import segmentation_models_pytorch as smp
+from torch.utils.data import DataLoader
+from dataset import SegmentationDataset
+import wandb
 
+
+class SegmentationModel(pl.LightningModule):
+    def __init__(
+        self, arch, encoder_name, in_channels, out_classes, args=None, **kwargs
+    ):
+        super().__init__()
+        self.model = smp.create_model(
+            arch,
+            encoder_name=encoder_name,
+            in_channels=in_channels,
+            classes=out_classes,
+            **kwargs,
+        )
+        self.args = args
+        # preprocessing parameteres for image
+        params = smp.encoders.get_preprocessing_params(encoder_name)
+        self.register_buffer("std", torch.tensor(params["std"]).view(1, 3, 1, 1))
+        self.register_buffer("mean", torch.tensor(params["mean"]).view(1, 3, 1, 1))
+        self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
+        # TODO:
+        self.training_step_outputs = {
+            "tp": [],
+            "fp": [],
+            "fn": [],
+            "tn": [],
+        }
+        self.validation_step_outputs = {
+            "tp": [],
+            "fp": [],
+            "fn": [],
+            "tn": [],
+        }
+
+    def forward(self, image):
+        # normalize image here
+        image = (image - self.mean) / self.std
+        mask = self.model(image)
+        return mask
+
+    def shared_step(self, batch, batch_idx, stage):
+        image = batch["image"]
+        assert image.ndim == 4
+        h, w = image.shape[2:]
+        assert h % 32 == 0 and w % 32 == 0
+        mask = batch["mask"]
+        assert mask.ndim == 4
+        assert mask.max() <= 1.0 and mask.min() >= 0
+        logits_mask = self.forward(image)
+        loss = self.loss_fn(logits_mask, mask)
+        self.log(f"loss/{stage} loss", loss)
+        prob_mask = logits_mask.sigmoid()
+        pred_mask = (prob_mask > 0.5).float()
+        tp, fp, fn, tn = smp.metrics.get_stats(
+            pred_mask.long(), mask.long(), mode="binary"
+        )
+
+        # TODO:
+        step_outputs = (
+            self.training_step_outputs
+            if stage == "train"
+            else self.validation_step_outputs
+        )
+        step_outputs["tp"].append(tp)
+        step_outputs["fp"].append(fp)
+        step_outputs["fn"].append(fn)
+        step_outputs["tn"].append(tn)
+
+        # self.add_images_to_tensorboard(batch_idx, image, mask, pred_mask, stage)
+
+        return loss
+
+    def reconstruct_labels(self, tp, fp, fn, tn):
+        y_true = []
+        y_pred = []
+
+        # True Positives: Both predicted and true labels are Positive
+        y_true.extend(["Positive"] * tp)
+        y_pred.extend(["Positive"] * tp)
+
+        # False Positives: Predicted Positive but actually Negative
+        y_true.extend(["Negative"] * fp)
+        y_pred.extend(["Positive"] * fp)
+
+        # False Negatives: Predicted Negative but actually Positive
+        y_true.extend(["Positive"] * fn)
+        y_pred.extend(["Negative"] * fn)
+
+        # True Negatives: Both predicted and true labels are Negative
+        y_true.extend(["Negative"] * tn)
+        y_pred.extend(["Negative"] * tn)
+
+        return y_true, y_pred
+
+    def shared_epoch_end(self, stage):
+        step_outputs = (
+            self.training_step_outputs
+            if stage == "train"
+            else self.validation_step_outputs
+        )
+
+        tp = torch.stack(step_outputs["tp"])
+        fp = torch.stack(step_outputs["fp"])
+        fn = torch.stack(step_outputs["fn"])
+        tn = torch.stack(step_outputs["tn"])
+        # TODO: why tp.shape is [204,4,1]
+        per_image_iou = smp.metrics.iou_score(
+            tp, fp, fn, tn, reduction="micro-imagewise"
+        )
+        dataset_iou = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
+        # TODO: shouldn't both be same?
+        self.log(f"{stage}_per_image_iou", per_image_iou, on_epoch=True)
+        self.log(f"{stage}_dataset_iou", dataset_iou, on_epoch=True)
+
+        print("Done")
+        for key in step_outputs.keys():
+            step_outputs[key].clear()
+
+        # y_true, y_pred = self.reconstruct_labels(tp, fp, fn, tn)
+        # wandb.log(
+        #     {
+        #         f"{stage}_confusion_matrix": wandb.plot.confusion_matrix(
+        #             probs=None, y_true=y_true, y_pred=y_pred, class_names=["vessel"]
+        #         ),
+        #         "epoch": self.current_epoch,
+        #     }
+        # )
+
+    def training_step(self, batch, batch_idx):
+        self.shared_step(batch, batch_idx, "train")
+
+    def validation_step(self, batch, batch_idx):
+        self.shared_step(batch, batch_idx, "valid")
+
+    def test_step(self, batch, batch_idx):
+        self.shared_step(batch, batch_idx, "test")
+
+    def on_train_epoch_end(self):
+        self.shared_epoch_end("train")
+
+    def on_validation_epoch_end(self):
+        self.shared_epoch_end("valid")
+
+    def on_test_epoch_end(self):
+        self.shared_epoch_end("test")
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=0.0001)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+    print(parser)
+    parser.add_argument("--data_directory", default="./sample_data", type=str)
+    parser.add_argument("--img_dirname", default="images", type=str)
+    parser.add_argument("--mask_dirname", default="masks", type=str)
+    parser.add_argument("--learning_rate", default=1e-3, type=float)
+    parser.add_argument("--step_lr_step", type=int, default=30)
+    parser.add_argument("--step_lr_gamma", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=0.0005)
+    parser.add_argument("--batch_size", default=4, type=int)
+    parser.add_argument("--num_epochs", default=100, type=int)
+    parser.add_argument("--optimizer", type=str, default="sgd")
+    parser.add_argument("--is_cuda", action="store_true", default=True)
+    parser.add_argument("--load_weights", action="store_true", default=False)
+    parser.add_argument("--path_to_model", default="./sample_data", type=str)
+    parser.add_argument("--dataset_len", default=-1, type=int)
+    parser.add_argument("--img_width", default=1024, type=int)
+    parser.add_argument("--img_height", default=1024, type=int)
+    parser.add_argument("--classes", default=1, type=int)
+    parser.add_argument("--in_channels", default=3, type=int)
+    parser.add_argument("--early_stopping_patience", default=-1, type=int)
+    parser.add_argument("--arch", default="Unet", type=str)
+    parser.add_argument("--encoder_name", default="resnet34", type=str)
+    parser.add_argument("--encoder_weights", default=None, type=str)
+
+    args, other_args = parser.parse_known_args()
+    args.arch = "Unet"
+    args.encoder_name = "resnet34"
+    args.encoder_weights = "imagenet"
+    args.data_directory = (
+        "/mnt/machine_learning/datasets/sky-segmentation/outside_combined_CAM"
+    )
+    args.img_dirname = "train_img"
+    args.mask_dirname = "train_masks"
+    args.num_epochs = 15
+    args.dataset_len = 100  # -1
+    args.classes = 1
+    args.optimizer = "adam"
+    args.img_width = 1024
+    args.img_height = 768
+    args.is_cuda = True
+    img_size = (args.img_width, args.img_height)
+
+    # Initialize wandb
+    wandb.init(project="vessel_segmentation", entity="henrikgabrielyan")
+
+    if not torch.cuda.is_available() or not args.is_cuda:
+        args.device = "cpu"
+        args.is_cuda = False
+        num_workers = os.cpu_count()
+        print("cuda not available")
+    else:
+        args.device = "cuda"
+        num_workers = torch.cuda.device_count()
+        args.gpu_count = torch.cuda.device_count()
+        print(f"cuda devices: {args.gpu_count}")
+
+    metrics = {
+        f"per_image_iou/train_per_image_iou": 0,
+        f"dataset_iou/train_dataset_iou": 0,
+        f"per_image_iou/valid_per_image_iou": 0,
+        f"dataset_iou/valid_dataset_iou": 0,
+    }
+
+    logger = WandbLogger(project="sky-segmentation", log_model=True)
+    hyper_dict = args.__dict__
+    logger.log_hyperparams(hyper_dict)
+
+    model = SegmentationModel(
+        args.arch,
+        args.encoder_name,
+        in_channels=args.in_channels,
+        out_classes=1,
+        args=args,  # TODO:
+    )
+    # TODO
+    #   model.save_hyperparameters(hyper_dict.keys())
+    #   print(model.hparams)
+    #   model.hparams = hyper_dict
+
+    data_path = "data"
+    train_dataset = SegmentationDataset(data_path, "train")
+    val_dataset = SegmentationDataset(data_path, "val")
+    test_dataset = SegmentationDataset(data_path, "test")
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
+
+    # TODO:
+    # val_images, val_masks = next(iter(val_loader))
+    # image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
+
+    trainer = pl.Trainer(
+        accelerator="gpu", devices=[0], max_epochs=500, callbacks=[], logger=logger
+    )
+    # TODO: test loader (write separately shared step)
+    trainer.fit(model, train_loader, val_loader)
+
+
+"""
+val_images, val_masks = next(iter(val_loader))
+image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
 
 class ImagePredictionLogger(pl.Callback):
     def __init__(self, val_samples, num_samples=3):
@@ -44,159 +290,4 @@ class ImagePredictionLogger(pl.Callback):
             ax[2].set_title("Predicted Mask")
             plt.savefig(f"output_{i}_{trainer.current_epoch}.png")
         pl_module.train()
-
-
-class UNet(pl.LightningModule):
-    def __init__(self):
-        super(UNet, self).__init__()
-        self.encoder = models.resnet34(pretrained=True)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            # nn.ConvTranspose2d(64, 1, kernel_size=1),
-            nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(1, 1, kernel_size=2, stride=2),
-        )
-        self.iou_metric = IntersectionOverUnion()
-
-    def forward(self, x):
-        # Encoder
-        x = self.encoder.conv1(x)
-        x = self.encoder.bn1(x)
-        x = self.encoder.relu(x)
-        x = self.encoder.maxpool(x)
-
-        x = self.encoder.layer1(x)
-        x = self.encoder.layer2(x)
-        x = self.encoder.layer3(x)
-        x = self.encoder.layer4(x)
-
-        # Decoder
-        x = self.decoder(x)
-        return x
-
-    def training_step(self, batch, batch_idx):
-        images, targets = batch
-        outputs = self(images)
-        # TODO: tmp
-        outputs = torch.squeeze(outputs, axis=1)
-        loss = F.binary_cross_entropy_with_logits(outputs, targets.float())
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        images, targets = batch
-        outputs = self(images)
-        outputs = torch.squeeze(outputs, axis=1)
-        loss = F.binary_cross_entropy_with_logits(outputs, targets.float())
-        # # Calculate IoU (assuming binary segmentation)
-        # preds = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
-        # self.iou_metric.update(preds, targets)
-        # Log loss
-        print(f"val_loss: {loss}")
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        return loss
-
-    # def on_validation_epoch_end(self, outputs):
-    #     # Compute and log IoU at the end of the epoch
-    #     iou_score = self.iou_metric.compute()
-    #     self.log("val_iou", iou_score, on_epoch=True, prog_bar=True)
-    #     # Reset IoU metric for the next epoch
-    #     self.iou_metric.reset()
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.001)
-
-
-class DRIVECustomDataset(Dataset):
-    def __init__(self, deeplake_dataset, transform=None, target_transform=None):
-        """
-        Custom dataset for the DRIVE dataset loaded via DeepLake.
-        Args:
-            deeplake_dataset: A DeepLake dataset object.
-            transform: Optional transform to be applied on a sample.
-        """
-        self.deeplake_dataset = deeplake_dataset
-        self.transform = transform
-        self.target_transform = target_transform
-
-    def __len__(self):
-        return len(self.deeplake_dataset["rgb_images"])
-
-    def __getitem__(self, idx):
-        # Load the images and masks
-        image = Image.fromarray(self.deeplake_dataset["rgb_images"][idx].numpy())
-        if self.transform:
-            image = self.transform(image)
-
-        target = self.deeplake_dataset["manual_masks/mask"][idx].numpy()[:, :, 0]
-        target = Image.fromarray(target)
-        if self.target_transform:
-            target = self.target_transform(target)
-        target = np.array(target)
-        target[target != 0] = 1
-        target = torch.from_numpy(target).long()
-        return image, target
-
-
-def main():
-    transform = T.Compose(
-        [
-            # TODO: will not work since we need to make sure that flip is applied
-            #  to both image and mask at the same time
-            # TODO: use albumentation
-            # T.RandomHorizontalFlip(),
-            # T.RandomVerticalFlip(),
-            # TODO: check picture incorrect_augmentation.png
-            # T.RandomRotation(degrees=(0, 360)),
-            # only applied to image with mode RGB
-            T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
-            T.Resize((256, 256)),
-            T.ToTensor(),
-        ]
-    )
-    target_transform = T.Compose(
-        [
-            # T.RandomHorizontalFlip(),
-            # T.RandomVerticalFlip(),
-            T.Resize((256, 256), interpolation=T.InterpolationMode.NEAREST),
-        ]
-    )
-
-    train_dataset = DRIVECustomDataset(
-        deeplake.load("hub://activeloop/drive-train"), transform, target_transform
-    )
-    # TODO:
-    # test_dataset = DRIVECustomDataset(deeplake.load("hub://activeloop/drive-test"))
-    train_size = int(0.8 * len(train_dataset))
-    val_size = len(train_dataset) - train_size
-    train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
-
-    # TODO: should val dataset have augmentation?
-
-    # Model, Trainer, and Training
-    model = UNet()
-    val_images, val_masks = next(iter(val_loader))
-    image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
-
-    trainer = pl.Trainer(
-        accelerator="gpu",
-        devices=[0],
-        max_epochs=500,
-        callbacks=[image_prediction_logger],
-    )
-    trainer.fit(model, train_loader, val_loader)
-
-
-if __name__ == "__main__":
-    main()
-
-# TODO: add checkpoint loading/saving
-# TODO: add augmentation
-# TODO: suppersampling or upsampling back resolution
+"""
