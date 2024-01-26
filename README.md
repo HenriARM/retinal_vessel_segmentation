@@ -18,4 +18,11 @@
 * add something from statistics (confidence tests etc.)
 
 
+* multi-layer loss
+
+
 pip install hydra-core
+
+
+
+* DiceLoss + FocalLoss https://gitlab.giraffe360-mimosa.com/machine-learning/training/mirror-segmentation-trainer/-/blob/main/scripts/model.py?ref_type=heads

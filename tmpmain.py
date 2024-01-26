@@ -5,33 +5,24 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
-import deeplake
-from dataset import DRIVECustomDataset
-from torchvision import transforms as T
-
-
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+from dataset import SegmentationDataset
+
 
 class SegmentationModel(pl.LightningModule):
     def __init__(
         self, arch, encoder_name, in_channels, out_classes, args=None, **kwargs
     ):
         super().__init__()
-        self.model = smp.Unet(
-            encoder_name="resnet34",
-            encoder_weights="imagenet",
-            in_channels=3,
-            classes=1,
+        self.model = smp.create_model(
+            arch,
+            encoder_name=encoder_name,
+            in_channels=in_channels,
+            classes=out_classes,
+            **kwargs,
         )
-        # self.model = smp.create_model(
-        #     arch,
-        #     encoder_name=encoder_name,
-        #     in_channels=in_channels,
-        #     classes=out_classes,
-        #     **kwargs,
-        # )
         self.args = args
         # preprocessing parameteres for image
         params = smp.encoders.get_preprocessing_params(encoder_name)
@@ -47,26 +38,15 @@ class SegmentationModel(pl.LightningModule):
 
     def shared_step(self, batch, stage):
         image = batch["image"]
-        # image = np.moveaxis(image, -1, 0)
-        # print(image)
-        # (batch_size, num_channels, height, width)
         assert image.ndim == 4
-        # Check that image dimensions are divisible by 32
         h, w = image.shape[2:]
         assert h % 32 == 0 and w % 32 == 0
         mask = batch["mask"]
-        # Shape of the mask should be [batch_size, num_classes, height, width]
-        # for binary segmentation num_classes = 1
         assert mask.ndim == 4
-        # Check that mask values in between 0 and 1, NOT 0 and 255 for binary segmentation
         assert mask.max() <= 1.0 and mask.min() >= 0
         logits_mask = self.forward(image)
-        # Predicted mask contains logits, and loss_fn param `from_logits` is set to True
         loss = self.loss_fn(logits_mask, mask)
         self.log(f"loss/{stage} loss", loss)
-        # Lets compute metrics for some threshold
-        # first convert mask values to probabilities, then
-        # apply thresholding
         prob_mask = logits_mask.sigmoid()
         pred_mask = (prob_mask > 0.5).float()
         # We will compute IoU metric by two ways
@@ -85,13 +65,10 @@ class SegmentationModel(pl.LightningModule):
             real_mask = np.moveaxis(mask[0].cpu().numpy(), 0, -1)
             # TODO: np.uint8
             image = np.moveaxis(image[0].cpu().numpy(), 0, -1)
-            real_mask = np.concatenate([real_mask]*3, axis=-1)*255
-            predicted_mask = np.concatenate([predicted_mask]*3, axis=-1)*255
-
-            print(image.shape)
-            print(real_mask.shape)
-            print(predicted_mask.shape)
+            real_mask = np.concatenate([real_mask] * 3, axis=-1) * 255
+            predicted_mask = np.concatenate([predicted_mask] * 3, axis=-1) * 255
             stacked = np.hstack((image, real_mask, predicted_mask))
+            # TODO: bgr
             cv2.imwrite(f"predicted_mask_{self.current_epoch}.png", stacked)
 
         return {
@@ -192,7 +169,7 @@ if __name__ == "__main__":
     args.img_height = 768
     args.is_cuda = True
     img_size = (args.img_width, args.img_height)
-    
+
     if not torch.cuda.is_available() or not args.is_cuda:
         args.device = "cpu"
         args.is_cuda = False
@@ -228,43 +205,17 @@ if __name__ == "__main__":
     #   print(model.hparams)
     #   model.hparams = hyper_dict
 
-    from torch.utils.data import DataLoader, random_split
-    transform = T.Compose(
-        [
-            # TODO: will not work since we need to make sure that flip is applied
-            #  to both image and mask at the same time
-            # TODO: use albumentation
-            # T.RandomHorizontalFlip(),
-            # T.RandomVerticalFlip(),
-            # TODO: check picture incorrect_augmentation.png
-            # T.RandomRotation(degrees=(0, 360)),
-            # only applied to image with mode RGB
-            T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
-            T.Resize((256, 256)),
-            T.ToTensor(),
-        ]
+    data_path = "data"
+    train_dataset = SegmentationDataset(data_path, "train")
+    val_dataset = SegmentationDataset(data_path, "val")
+    test_dataset = SegmentationDataset(data_path, "test")
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=4, shuffle=True
     )
-    target_transform = T.Compose(
-        [
-            # T.RandomHorizontalFlip(),
-            # T.RandomVerticalFlip(),
-            T.Resize((256, 256), interpolation=T.InterpolationMode.NEAREST),
-        ]
-    )
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=4, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False)
 
-    train_dataset = DRIVECustomDataset(
-        deeplake.load("hub://activeloop/drive-train"), transform, target_transform
-    )
-    train_size = int(0.8 * len(train_dataset))
-    val_size = len(train_dataset) - train_size
-    train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size= 4, shuffle=False, num_workers=4)
-
-    # TODO: val ds should not have augmentation
-
-    # Model, Trainer, and Training
-    # model = UNet()
+    # TODO:
     # val_images, val_masks = next(iter(val_loader))
     # image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
 
@@ -276,4 +227,3 @@ if __name__ == "__main__":
         # logger=logger
     )
     trainer.fit(model, train_loader, val_loader)
-
