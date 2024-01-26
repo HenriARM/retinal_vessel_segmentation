@@ -38,10 +38,9 @@ class SegmentationDataset(Dataset):
         image = np.asarray(image)
         mask = np.asarray(mask)
         mask = mask / 255.0  # np.unique(mask.flatten())
-        # TODO: threshold?
         mask = np.where(mask > 0.5, 1, 0)
-
-        image = self.transform(image)
-        mask = self.transform(mask)
-
-        return image, mask
+        sample = {}
+        # convert to other format HWC -> CHW
+        sample["image"] = np.moveaxis(image, -1, 0)
+        sample["mask"] = np.expand_dims(mask, 0)
+        return sample
