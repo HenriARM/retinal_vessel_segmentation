@@ -82,8 +82,7 @@ class SegmentationModel(pl.LightningModule):
                                 },
                             },
                         )
-                    },
-                    step=self.current_epoch,
+                    }
                 )
 
         # calculate confusion matrix
