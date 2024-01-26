@@ -2,13 +2,16 @@ import argparse
 import os
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 from dataset import SegmentationDataset
+
+import utils
+import wandb
 
 
 class SegmentationModel(pl.LightningModule):
@@ -29,6 +32,19 @@ class SegmentationModel(pl.LightningModule):
         self.register_buffer("std", torch.tensor(params["std"]).view(1, 3, 1, 1))
         self.register_buffer("mean", torch.tensor(params["mean"]).view(1, 3, 1, 1))
         self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
+        # TODO:
+        self.training_step_outputs = {
+            "tp": [],
+            "fp": [],
+            "fn": [],
+            "tn": [],
+        }
+        self.validation_step_outputs = {
+            "tp": [],
+            "fp": [],
+            "fn": [],
+            "tn": [],
+        }
 
     def forward(self, image):
         # normalize image here
@@ -36,7 +52,7 @@ class SegmentationModel(pl.LightningModule):
         mask = self.model(image)
         return mask
 
-    def shared_step(self, batch, stage):
+    def shared_step(self, batch, batch_idx, stage):
         image = batch["image"]
         assert image.ndim == 4
         h, w = image.shape[2:]
@@ -49,78 +65,98 @@ class SegmentationModel(pl.LightningModule):
         self.log(f"loss/{stage} loss", loss)
         prob_mask = logits_mask.sigmoid()
         pred_mask = (prob_mask > 0.5).float()
-        # We will compute IoU metric by two ways
-        #   1. dataset-wise
-        #   2. image-wise
-        # but for now we just compute true positive, false positive, false negative and
-        # true negative 'pixels' for each image and class
-        # these values will be aggregated in the end of an epoch
         tp, fp, fn, tn = smp.metrics.get_stats(
             pred_mask.long(), mask.long(), mode="binary"
         )
 
-        # plot mask predicted if stage is valid
-        if stage == "valid":
-            predicted_mask = np.moveaxis(pred_mask[0].cpu().numpy(), 0, -1)
-            real_mask = np.moveaxis(mask[0].cpu().numpy(), 0, -1)
-            # TODO: np.uint8
-            image = np.moveaxis(image[0].cpu().numpy(), 0, -1)
-            real_mask = np.concatenate([real_mask] * 3, axis=-1) * 255
-            predicted_mask = np.concatenate([predicted_mask] * 3, axis=-1) * 255
-            stacked = np.hstack((image, real_mask, predicted_mask))
-            # TODO: bgr
-            cv2.imwrite(f"predicted_mask_{self.current_epoch}.png", stacked)
+        # TODO:
+        step_outputs = (
+            self.training_step_outputs
+            if stage == "train"
+            else self.validation_step_outputs
+        )
+        step_outputs["tp"].append(tp)
+        step_outputs["fp"].append(fp)
+        step_outputs["fn"].append(fn)
+        step_outputs["tn"].append(tn)
 
-        return {
-            "loss": loss,
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
-            "tn": tn,
-        }
+        # self.add_images_to_tensorboard(batch_idx, image, mask, pred_mask, stage)
 
-    def shared_epoch_end(self, outputs, stage):
-        # aggregate step metics
-        tp = torch.cat([x["tp"] for x in outputs])
-        fp = torch.cat([x["fp"] for x in outputs])
-        fn = torch.cat([x["fn"] for x in outputs])
-        tn = torch.cat([x["tn"] for x in outputs])
+        return loss
 
-        # per image IoU means that we first calculate IoU score for each image
-        # and then compute mean over these scores
+    def reconstruct_labels(self, tp, fp, fn, tn):
+        y_true = []
+        y_pred = []
+
+        # True Positives: Both predicted and true labels are Positive
+        y_true.extend(["Positive"] * tp)
+        y_pred.extend(["Positive"] * tp)
+
+        # False Positives: Predicted Positive but actually Negative
+        y_true.extend(["Negative"] * fp)
+        y_pred.extend(["Positive"] * fp)
+
+        # False Negatives: Predicted Negative but actually Positive
+        y_true.extend(["Positive"] * fn)
+        y_pred.extend(["Negative"] * fn)
+
+        # True Negatives: Both predicted and true labels are Negative
+        y_true.extend(["Negative"] * tn)
+        y_pred.extend(["Negative"] * tn)
+
+        return y_true, y_pred
+
+    def shared_epoch_end(self, stage):
+        step_outputs = (
+            self.training_step_outputs
+            if stage == "train"
+            else self.validation_step_outputs
+        )
+
+        tp = torch.stack(step_outputs["tp"])
+        fp = torch.stack(step_outputs["fp"])
+        fn = torch.stack(step_outputs["fn"])
+        tn = torch.stack(step_outputs["tn"])
+        # TODO: why tp.shape is [204,4,1]
         per_image_iou = smp.metrics.iou_score(
             tp, fp, fn, tn, reduction="micro-imagewise"
         )
-
-        # dataset IoU means that we aggregate intersection and union over whole dataset
-        # and then compute IoU score. The difference between dataset_iou and per_image_iou scores
-        # in this particular case will not be much, however for dataset
-        # with "empty" images (images without target class) a large gap could be observed.
-        # Empty images influence a lot on per_image_iou and much less on dataset_iou.
         dataset_iou = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
+        # TODO: shouldn't both be same?
+        self.log(f"{stage}_per_image_iou", per_image_iou, on_epoch=True)
+        self.log(f"{stage}_dataset_iou", dataset_iou, on_epoch=True)
 
-        metrics = {
-            f"per_image_iou/{stage}_per_image_iou": per_image_iou,
-            f"dataset_iou/{stage}_dataset_iou": dataset_iou,
-        }
+        print("Done")
+        for key in step_outputs.keys():
+            step_outputs[key].clear()
 
-        self.log_dict(metrics, prog_bar=True)
-
-        if stage == "valid":
-            hyper_metrics = {
-                f"hparam/{stage}_per_image_iou": per_image_iou,
-                f"hparam/{stage}_dataset_iou": dataset_iou,
-            }
-        self.trainer.logger.log_hyperparams(args.__dict__, metrics=hyper_metrics)
+        # y_true, y_pred = self.reconstruct_labels(tp, fp, fn, tn)
+        # wandb.log(
+        #     {
+        #         f"{stage}_confusion_matrix": wandb.plot.confusion_matrix(
+        #             probs=None, y_true=y_true, y_pred=y_pred, class_names=["vessel"]
+        #         ),
+        #         "epoch": self.current_epoch,
+        #     }
+        # )
 
     def training_step(self, batch, batch_idx):
-        return self.shared_step(batch, "train")
+        self.shared_step(batch, batch_idx, "train")
 
     def validation_step(self, batch, batch_idx):
-        return self.shared_step(batch, "valid")
+        self.shared_step(batch, batch_idx, "valid")
 
     def test_step(self, batch, batch_idx):
-        return self.shared_step(batch, "test")
+        self.shared_step(batch, batch_idx, "test")
+
+    def on_train_epoch_end(self):
+        self.shared_epoch_end("train")
+
+    def on_validation_epoch_end(self):
+        self.shared_epoch_end("valid")
+
+    def on_test_epoch_end(self):
+        self.shared_epoch_end("test")
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.0001)
@@ -170,6 +206,9 @@ if __name__ == "__main__":
     args.is_cuda = True
     img_size = (args.img_width, args.img_height)
 
+    # Initialize wandb
+    wandb.init(project="vessel_segmentation", entity="henrikgabrielyan")
+
     if not torch.cuda.is_available() or not args.is_cuda:
         args.device = "cpu"
         args.is_cuda = False
@@ -188,17 +227,16 @@ if __name__ == "__main__":
         f"dataset_iou/valid_dataset_iou": 0,
     }
 
-    logger = TensorBoardLogger("tb_logs", default_hp_metric=False)
+    logger = WandbLogger(project="sky-segmentation", log_model=True)
     hyper_dict = args.__dict__
-
-    logger.log_hyperparams(hyper_dict, metrics=metrics)
+    logger.log_hyperparams(hyper_dict)
 
     model = SegmentationModel(
         args.arch,
         args.encoder_name,
         in_channels=args.in_channels,
         out_classes=1,
-        args=args,
+        args=args,  # TODO:
     )
     # TODO
     #   model.save_hyperparameters(hyper_dict.keys())
@@ -210,20 +248,21 @@ if __name__ == "__main__":
     val_dataset = SegmentationDataset(data_path, "val")
     test_dataset = SegmentationDataset(data_path, "test")
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=4, shuffle=True
+        train_dataset, batch_size=4, shuffle=True, num_workers=4
     )
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=4, shuffle=False)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False)
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=4, shuffle=False, num_workers=4
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=4, shuffle=False, num_workers=4
+    )
 
     # TODO:
     # val_images, val_masks = next(iter(val_loader))
     # image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
 
     trainer = pl.Trainer(
-        accelerator="gpu",
-        devices=[0],
-        max_epochs=500,
-        callbacks=[],
-        # logger=logger
+        accelerator="gpu", devices=[0], max_epochs=500, callbacks=[], logger=logger
     )
+    # TODO: test loader (write separately shared step)
     trainer.fit(model, train_loader, val_loader)
