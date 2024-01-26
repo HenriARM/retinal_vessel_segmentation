@@ -28,21 +28,16 @@ class SegmentationModel(pl.LightningModule):
         self.register_buffer("std", torch.tensor(params["std"]).view(1, 3, 1, 1))
         self.register_buffer("mean", torch.tensor(params["mean"]).view(1, 3, 1, 1))
         self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
-        # TODO:
-        self.training_step_outputs = {
-            "tp": [],
-            "fp": [],
-            "fn": [],
-            "tn": [],
-        }
-        self.validation_step_outputs = {
-            "tp": [],
-            "fp": [],
-            "fn": [],
-            "tn": [],
-        }
-
         self.loss_dict = {"train": [], "val": [], "test": []}
+        self.tp_dict = {"train": [], "val": [], "test": []}
+        self.fp_dict = {"train": [], "val": [], "test": []}
+        self.fn_dict = {"train": [], "val": [], "test": []}
+        self.tn_dict = {"train": [], "val": [], "test": []}
+        self.iou_score = {"train": [], "val": [], "test": []}
+        self.f1_score = {"train": [], "val": [], "test": []}
+        self.f2_score = {"train": [], "val": [], "test": []}
+        self.accuracy = {"train": [], "val": [], "test": []}
+        self.recall = {"train": [], "val": [], "test": []}
 
     def forward(self, image):
         # normalize image here
@@ -88,23 +83,34 @@ class SegmentationModel(pl.LightningModule):
                             },
                         )
                     },
-                    step=batch_idx,
+                    step=self.current_epoch,
                 )
 
+        # calculate confusion matrix
         tp, fp, fn, tn = smp.metrics.get_stats(
             pred_mask.long(), mask.long(), mode="binary"
         )
+        self.tp_dict[stage].append(tp)
+        self.fp_dict[stage].append(fp)
+        self.fn_dict[stage].append(fn)
+        self.tn_dict[stage].append(tn)
 
-        # TODO:
-        step_outputs = (
-            self.training_step_outputs
-            if stage == "train"
-            else self.validation_step_outputs
-        )
-        step_outputs["tp"].append(tp)
-        step_outputs["fp"].append(fp)
-        step_outputs["fn"].append(fn)
-        step_outputs["tn"].append(tn)
+        # calculate iou score
+        iou_score = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
+        self.iou_score[stage].append(iou_score)
+
+        # calculate other metrics
+        f1_score = smp.metrics.f1_score(tp, fp, fn, tn, reduction="micro")
+        self.f1_score[stage].append(f1_score)
+
+        f2_score = smp.metrics.fbeta_score(tp, fp, fn, tn, beta=2, reduction="micro")
+        self.f2_score[stage].append(f2_score)
+
+        accuracy = smp.metrics.accuracy(tp, fp, fn, tn, reduction="macro")
+        self.accuracy[stage].append(accuracy)
+
+        recall = smp.metrics.recall(tp, fp, fn, tn, reduction="micro-imagewise")
+        self.recall[stage].append(recall)
 
         return loss
 
@@ -131,32 +137,42 @@ class SegmentationModel(pl.LightningModule):
         return y_true, y_pred
 
     def shared_epoch_end(self, stage):
+        print(f"Epoch {self.current_epoch} {stage} loss: {self.loss_dict[stage]}")
+        # plot loss
         avg_loss = torch.stack(self.loss_dict[stage]).mean()
-        self.log(
-            f"loss/{stage}_dice_loss_epoch", avg_loss, on_epoch=True, on_step=False
-        )
+        self.log(f"loss/{stage}_dice_loss", avg_loss, on_epoch=True, on_step=False)
+        self.loss_dict[stage].clear()
 
-        step_outputs = (
-            self.training_step_outputs
-            if stage == "train"
-            else self.validation_step_outputs
-        )
+        # plot iou score
+        iou_score = torch.stack(self.iou_score[stage]).mean()
+        self.log(f"metrics/{stage}_iou", iou_score, on_epoch=True, on_step=False)
+        self.iou_score[stage].clear()
 
-        tp = torch.stack(step_outputs["tp"])
-        fp = torch.stack(step_outputs["fp"])
-        fn = torch.stack(step_outputs["fn"])
-        tn = torch.stack(step_outputs["tn"])
-        # TODO: why tp.shape is [204,4,1]
-        per_image_iou = smp.metrics.iou_score(
-            tp, fp, fn, tn, reduction="micro-imagewise"
-        )
-        dataset_iou = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro")
-        # TODO: shouldn't both be same?
-        self.log(f"{stage}_per_image_iou", per_image_iou, on_epoch=True)
-        self.log(f"{stage}_dataset_iou", dataset_iou, on_epoch=True)
+        # plot f1 score
+        f1_score = torch.stack(self.f1_score[stage]).mean()
+        self.log(f"metrics/{stage}_f1_score", f1_score, on_epoch=True, on_step=False)
+        self.f1_score[stage].clear()
 
-        for key in step_outputs.keys():
-            step_outputs[key].clear()
+        # plot f2 score
+        f2_score = torch.stack(self.f2_score[stage]).mean()
+        self.log(f"metrics/{stage}_f2_score", f2_score, on_epoch=True, on_step=False)
+        self.f2_score[stage].clear()
+
+        # plot accuracy
+        accuracy = torch.stack(self.accuracy[stage]).mean()
+        self.log(f"metrics/{stage}_accuracy", accuracy, on_epoch=True, on_step=False)
+        self.accuracy[stage].clear()
+
+        # plot recall
+        recall = torch.stack(self.recall[stage]).mean()
+        self.log(f"metrics/{stage}_recall", recall, on_epoch=True, on_step=False)
+        self.recall[stage].clear()
+
+        # TODO: plot confusion matrix
+        # tp = torch.stack(self.tp_dict[stage]).mean()
+        # fp = torch.stack(self.fp_dict[stage]).mean()
+        # fn = torch.stack(self.fn_dict[stage]).mean()
+        # tn = torch.stack(self.tn_dict[stage]).mean()
 
         # y_true, y_pred = self.reconstruct_labels(tp, fp, fn, tn)
         # wandb.log(

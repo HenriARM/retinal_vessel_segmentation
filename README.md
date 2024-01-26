@@ -38,6 +38,7 @@ $ python main.py
 * multi-layer loss
 * DiceLoss + FocalLoss https://gitlab.giraffe360-mimosa.com/machine-learning/training/mirror-segmentation-trainer/-/blob/main/scripts/model.py?ref_type=heads
 
+* wandb don't delete local runs which were removed on website
 
 pip install hydra-core
 
