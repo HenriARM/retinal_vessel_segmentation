@@ -40,11 +40,15 @@ def save_images_and_masks(ds: Dataset, subset_name):
 
     for idx in range(len(ds)):
         image = ds[idx]["rgb_images"].numpy()
-        imsave(subset_dir / f"image-idx{idx}_original.png", image)
+        image_dir = subset_dir / "images"
+        os.makedirs(image_dir, exist_ok=True)
+        imsave(image_dir / f"image-idx{idx}_original.png", image)
 
         if subset_name != "test":
             mask = (255 * ds[idx]["manual_masks/mask"].numpy()[:, :, 0]).astype(np.uint8)
-            imsave(subset_dir / f"mask-idx{idx}_original.png", mask)
+            mask_dir = subset_dir / "masks"
+            os.makedirs(mask_dir, exist_ok=True)
+            imsave(mask_dir / f"mask-idx{idx}_original.png", mask)
 
         if subset_name == "train":
             num_augmentations_per_image = 50
@@ -53,8 +57,8 @@ def save_images_and_masks(ds: Dataset, subset_name):
                 augmented_image = augmented["image"]
                 augmented_mask = augmented["mask"]
                 # TODO: save as augm_horizontal_p0.5_vertical_p0.5_rotate90_p0.5.png
-                imsave(subset_dir / f"image-idx{idx}-augm{i}.png", augmented_image)
-                imsave(subset_dir / f"mask-idx{idx}-augm{i}.png", augmented_mask)
+                imsave(image_dir / f"image-idx{idx}-augm{i}.png", augmented_image)
+                imsave(mask_dir / f"mask-idx{idx}-augm{i}.png", augmented_mask)
 
 
 def main():
