@@ -58,7 +58,7 @@ class SegmentationModel(pl.LightningModule):
         assert mask.max() <= 1.0 and mask.min() >= 0
         logits_mask = self.forward(image)
         loss = self.loss_fn(logits_mask, mask)
-        self.log(f"loss/{stage} loss", loss)
+        self.log(f"loss/{stage} dice_loss", loss, on_step=True, on_epoch=True)
         prob_mask = logits_mask.sigmoid()
         pred_mask = (prob_mask > 0.5).float()
 
@@ -105,7 +105,7 @@ class SegmentationModel(pl.LightningModule):
                             },
                         )
                     },
-                    step=self.current_epoch,
+                    step=batch_idx,
                 )
 
         tp, fp, fn, tn = smp.metrics.get_stats(
@@ -122,8 +122,6 @@ class SegmentationModel(pl.LightningModule):
         step_outputs["fp"].append(fp)
         step_outputs["fn"].append(fn)
         step_outputs["tn"].append(tn)
-
-        # self.add_images_to_tensorboard(batch_idx, image, mask, pred_mask, stage)
 
         return loss
 
@@ -190,19 +188,7 @@ class SegmentationModel(pl.LightningModule):
         self.shared_step(batch, batch_idx, "valid")
 
     def test_step(self, batch, batch_idx):
-        self.training_step(batch, batch_idx, "test")
-        # image = batch["image"]
-        # logits_mask = self.forward(image)
-        # prob_mask = logits_mask.sigmoid()
-        # pred_mask = (prob_mask > 0.5).float()
-
-        # for i in range(image.shape[0]):
-        #     wandb.log(
-        #         {
-        #             "test_image": wandb.Image(image[i]),
-        #             "test_pred": wandb.Image(pred_mask[i]),
-        #         }
-        #     )
+        self.shared_step(batch, batch_idx, "test")
 
     def on_train_epoch_end(self):
         self.shared_epoch_end("train")
@@ -214,7 +200,7 @@ class SegmentationModel(pl.LightningModule):
         self.shared_epoch_end("test")
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.001)
+        return torch.optim.Adam(self.parameters(), lr=0.0001)
 
 
 if __name__ == "__main__":
@@ -311,42 +297,3 @@ if __name__ == "__main__":
     )
     trainer.fit(model, train_loader, val_loader)
     # TODO: trainer.test(dataloaders=test_loader)or run on Multiple GPUs so it would be in parallel
-
-
-"""
-val_images, val_masks = next(iter(val_loader))
-image_prediction_logger = ImagePredictionLogger(val_samples=(val_images, val_masks))
-
-class ImagePredictionLogger(pl.Callback):
-    def __init__(self, val_samples, num_samples=3):
-        super().__init__()
-        self.val_samples = val_samples
-        self.num_samples = num_samples
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        if trainer.current_epoch % 10 != 0:
-            return
-        pl_module.eval()
-        images, masks = self.val_samples
-        with torch.no_grad():
-            preds = pl_module(images.to(pl_module.device))
-        images = images.cpu()
-        masks = masks.cpu()
-        preds = preds.cpu()
-
-        for i in range(self.num_samples):
-            fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-            ax[0].imshow(
-                images[i].permute(1, 2, 0)
-            )  # Assuming images are in [C, H, W] format
-            ax[0].set_title("Input Image")
-            ax[1].imshow(masks[i].squeeze())  # Assuming masks are in [1, H, W] format
-            ax[1].set_title("Ground Truth Mask")
-            ax[2].imshow(preds[i].squeeze())  # Assuming preds are in [1, H, W] format
-            ax[2].set_title("Predicted Mask")
-            plt.savefig(f"output_{i}_{trainer.current_epoch}.png")
-        pl_module.train()
-"""
-
-
-# TODO: ready to use visualisation for segmentation in wandb
