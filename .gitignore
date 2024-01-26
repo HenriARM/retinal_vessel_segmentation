@@ -1,6 +1,8 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 lightning_logs/
+tensorboard_logs/
+data/
 *.py[cod]
 *$py.class
 
