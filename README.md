@@ -6,6 +6,17 @@
 # Augmentation
 ![augmentation](resources/augmentations.png)
 
+# Training (fucked color channel)
+![0](resources/predicted_mask_0.png)
+![1](resources/predicted_mask_1.png)
+![2](resources/predicted_mask_2.png)
+![3](resources/predicted_mask_3.png)
+
+# Test example
+![114](resources/predicted_mask_114.png)
+![217](resources/predicted_mask_217.png)
+
+
 # Installation
 ```bash
 $ pip install -r requirements.txt
