@@ -1,7 +1,10 @@
 # retinal_vessel_segmentation
 
 # Data
-![example](example.png)
+![example](resources/example.png)
+
+# Augmentation
+![augmentation](resources/augmentations.png)
 
 # Installation
 ```bash
