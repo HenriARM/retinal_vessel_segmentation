@@ -42,6 +42,8 @@ class SegmentationModel(pl.LightningModule):
             "tn": [],
         }
 
+        self.loss_dict = {"train": [], "val": [], "test": []}
+
     def forward(self, image):
         # normalize image here
         image = (image - self.mean) / self.std
@@ -58,11 +60,11 @@ class SegmentationModel(pl.LightningModule):
         assert mask.max() <= 1.0 and mask.min() >= 0
         logits_mask = self.forward(image)
         loss = self.loss_fn(logits_mask, mask)
-        self.log(f"loss/{stage} dice_loss", loss, on_step=True, on_epoch=True)
+        self.loss_dict[stage].append(loss)
         prob_mask = logits_mask.sigmoid()
         pred_mask = (prob_mask > 0.5).float()
 
-        if stage == "valid":
+        if stage == "val":
             # batch_concatenated_images = []
             for i in range(image.shape[0]):
                 img_np = image[i].permute(1, 2, 0).cpu().numpy()  # [H, W, C] format
@@ -70,25 +72,6 @@ class SegmentationModel(pl.LightningModule):
                 pred_mask_np = pred_mask[i].squeeze().cpu().numpy()  # [H, W] format
                 # Normalize the image for display if necessary  # TODO:
                 img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
-                # make mask from (256,256) to (256,256,3)
-                # mask_np = np.stack((mask_np,) * 3, axis=-1)
-                # pred_mask_np = np.stack((pred_mask_np,) * 3, axis=-1)
-                #     # Concatenate the images side by side
-                #     concatenated_image = np.hstack((img_np, mask_np, pred_mask_np))
-                #     batch_concatenated_images.append(concatenated_image)
-                # big_batch_image = np.vstack(batch_concatenated_images)
-                # wandb.log(
-                #     data={
-                #         f"{stage}_step_{batch_idx}": [
-                #             wandb.Image(
-                #                 big_batch_image,
-                #                 caption="Batch Images | Masks | Predictions",
-                #             )
-                #         ]
-                #     },
-                #     step=self.current_epoch,
-                # )
-
                 wandb.log(
                     {
                         f"{stage}_idx{i}": wandb.Image(
@@ -148,6 +131,11 @@ class SegmentationModel(pl.LightningModule):
         return y_true, y_pred
 
     def shared_epoch_end(self, stage):
+        avg_loss = torch.stack(self.loss_dict[stage]).mean()
+        self.log(
+            f"loss/{stage}_dice_loss_epoch", avg_loss, on_epoch=True, on_step=False
+        )
+
         step_outputs = (
             self.training_step_outputs
             if stage == "train"
@@ -167,7 +155,6 @@ class SegmentationModel(pl.LightningModule):
         self.log(f"{stage}_per_image_iou", per_image_iou, on_epoch=True)
         self.log(f"{stage}_dataset_iou", dataset_iou, on_epoch=True)
 
-        print("Done")
         for key in step_outputs.keys():
             step_outputs[key].clear()
 
@@ -182,22 +169,22 @@ class SegmentationModel(pl.LightningModule):
         # )
 
     def training_step(self, batch, batch_idx):
-        self.shared_step(batch, batch_idx, "train")
+        return self.shared_step(batch, batch_idx, "train")
 
     def validation_step(self, batch, batch_idx):
-        self.shared_step(batch, batch_idx, "valid")
+        return self.shared_step(batch, batch_idx, "val")
 
     def test_step(self, batch, batch_idx):
-        self.shared_step(batch, batch_idx, "test")
+        return self.shared_step(batch, batch_idx, "test")
 
     def on_train_epoch_end(self):
-        self.shared_epoch_end("train")
+        return self.shared_epoch_end("train")
 
     def on_validation_epoch_end(self):
-        self.shared_epoch_end("valid")
+        return self.shared_epoch_end("val")
 
     def on_test_epoch_end(self):
-        self.shared_epoch_end("test")
+        return self.shared_epoch_end("test")
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.0001)
