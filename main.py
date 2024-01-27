@@ -15,6 +15,8 @@ class SegmentationModel(pl.LightningModule):
         self, arch, encoder_name, in_channels, out_classes, args=None, **kwargs
     ):
         super().__init__()
+        # TODO:
+        self.save_hyperparameters()
         self.model = smp.create_model(
             arch,
             encoder_name=encoder_name,
