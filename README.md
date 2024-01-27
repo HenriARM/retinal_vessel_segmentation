@@ -23,22 +23,47 @@ $ pip install -r requirements.txt
 $ python prepare_dataset.py
 $ python main.py
 ```
+TODO: about all scripts
+
+# Features
+* Monitoring with W&B
+* HPO
+* Running of multiple configs with hydra
+...TODO
+
 
 # TODO
-* add checkpoint backbone
 * suppersampling or upsampling back resolution (GuidedConvFilter add to the architecture)
-* stable diffusion for data augmentation
+* stable diffusion for data augmentation (ControlNet) 
 * U-net squarred
 * hydra
 * interpretebility (gradcam, saliency maps ,captum)
 * distributed training
-* Mask2Former
-* use torch.timm other backbones
-* hyperopt
+* MaskFormer, FocalNet
+* use torch.timm or smp backbones
+* hyperopt (hpo)
 * multi-layer loss
 * DiceLoss + FocalLoss https://gitlab.giraffe360-mimosa.com/machine-learning/training/mirror-segmentation-trainer/-/blob/main/scripts/model.py?ref_type=heads
+* Tversky loss (check smp libraries loss and metrics)
+* add reqs (mamba, miniconda, devcontainer)
+* add confusion matrix to wandb
+* add modelcheckpoint for saving weights
+* self-supervised learning (since masks are not perfect)
+* advanced train set augmentation (ideas :get new images with diffusion -> segment -> retrain and compare, maybe filter out bad masks visually or which are out of distribution)
+* try to inference with this model bigger dataset on Kaggle and compare
+* numba and torch.jit
+* model pruning and distillation
+* openvino inference
 
+
+# Fix
+* show augmented training image masks
 * wandb don't delete local runs which were removed on website
+* wandb multiple colors on segmentation
+* wandb image plot steps don't match epoch
+* inverse mask
+* inference not working (+ test trainer.test)
+
 
 pip install hydra-core
 

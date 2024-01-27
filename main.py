@@ -238,7 +238,7 @@ if __name__ == "__main__":
     args.encoder_name = "resnet34"
     args.encoder_weights = "imagenet"
     args.data_directory = (
-        "/mnt/machine_learning/datasets/sky-segmentation/outside_combined_CAM"
+        "TODO"
     )
     args.img_dirname = "train_img"
     args.mask_dirname = "train_masks"
@@ -272,7 +272,7 @@ if __name__ == "__main__":
         f"dataset_iou/valid_dataset_iou": 0,
     }
 
-    logger = WandbLogger(project="sky-segmentation", log_model=True)
+    logger = WandbLogger(project="vessel-segmentation", log_model=True)
     hyper_dict = args.__dict__
     logger.log_hyperparams(hyper_dict)
 
